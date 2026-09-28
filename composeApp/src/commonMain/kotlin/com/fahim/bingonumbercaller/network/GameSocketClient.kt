@@ -2,6 +2,7 @@ package com.fahim.bingonumbercaller.network
 
 import com.fahim.bingonumbercaller.model.ConnectionInfo
 import com.fahim.bingonumbercaller.protocol.ClientMessage
+import com.fahim.bingonumbercaller.protocol.ProtocolLimits
 import com.fahim.bingonumbercaller.protocol.ServerMessage
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -30,9 +31,13 @@ import kotlinx.serialization.json.Json
 
 class GameSocketClient(
     private val client: HttpClient = HttpClient {
-        install(WebSockets)
+        install(WebSockets) {
+            maxFrameSize = ProtocolLimits.MAX_FRAME_BYTES
+            // Client-side pings so a half-open socket (Wi-Fi drop, screen off) is noticed and reconnect kicks in
+            pingIntervalMillis = PING_INTERVAL_MILLIS
+        }
     }
-) {
+) : PlayerConnection, HostConnection {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var session: DefaultClientWebSocketSession? = null
     private var receiveJob: Job? = null
@@ -40,23 +45,32 @@ class GameSocketClient(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _incomingMessages = MutableSharedFlow<ServerMessage>(extraBufferCapacity = 64)
-    val incomingMessages: SharedFlow<ServerMessage> = _incomingMessages.asSharedFlow()
+    override val incomingMessages: SharedFlow<ServerMessage> = _incomingMessages.asSharedFlow()
 
     private val _isConnected = MutableStateFlow(false)
-    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+    override val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
-    suspend fun connectAsPlayer(connectionInfo: ConnectionInfo) {
-        connect(connectionInfo, isHost = false)
+    override suspend fun connectAsPlayer(connectionInfo: ConnectionInfo, rejoinToken: String?, playerName: String?) {
+        connect(
+            socketUrl = "ws://${connectionInfo.host}:${connectionInfo.port}/game",
+            joinMessage = ClientMessage.JoinAsPlayer(
+                sessionToken = connectionInfo.sessionToken,
+                rejoinToken = rejoinToken,
+                playerName = playerName
+            )
+        )
     }
 
-    suspend fun connectAsHost(connectionInfo: ConnectionInfo) {
-        connect(connectionInfo, isHost = true)
+    override suspend fun connectAsHost(hostSession: HostSession) {
+        connect(
+            socketUrl = hostSession.hostSocketUrl,
+            joinMessage = ClientMessage.JoinAsHost(hostSecret = hostSession.hostSecret)
+        )
     }
 
-    private suspend fun connect(connectionInfo: ConnectionInfo, isHost: Boolean) {
+    private suspend fun connect(socketUrl: String, joinMessage: ClientMessage) {
         disconnect()
 
-        val socketUrl = "ws://${connectionInfo.host}:${connectionInfo.port}/game"
         try {
             val newSession = client.webSocketSession {
                 url(socketUrl)
@@ -64,12 +78,6 @@ class GameSocketClient(
             session = newSession
             _isConnected.value = true
 
-            // Send initial join message
-            val joinMessage = if (isHost) {
-                ClientMessage.JoinAsHost(sessionToken = connectionInfo.sessionToken)
-            } else {
-                ClientMessage.JoinAsPlayer(sessionToken = connectionInfo.sessionToken)
-            }
             sendMessage(joinMessage)
 
             // Listen for incoming messages
@@ -100,15 +108,15 @@ class GameSocketClient(
         }
     }
 
-    suspend fun claimFullHouse(ticketId: String) {
+    override suspend fun claimFullHouse(ticketId: String) {
         sendMessage(ClientMessage.ClaimFullHouse(ticketId = ticketId))
     }
 
-    suspend fun drawNumber() {
+    override suspend fun drawNumber() {
         sendMessage(ClientMessage.DrawNumber)
     }
 
-    suspend fun requestNewGame() {
+    override suspend fun requestNewGame() {
         sendMessage(ClientMessage.RequestNewGame)
     }
 
@@ -120,7 +128,7 @@ class GameSocketClient(
         }
     }
 
-    suspend fun disconnect() {
+    override suspend fun disconnect() {
         receiveJob?.cancel()
         receiveJob = null
         try {
@@ -130,5 +138,9 @@ class GameSocketClient(
         }
         session = null
         _isConnected.value = false
+    }
+
+    private companion object {
+        const val PING_INTERVAL_MILLIS = 10_000L
     }
 }

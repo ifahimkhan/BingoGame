@@ -35,14 +35,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.fahim.bingonumbercaller.model.ConnectionInfo
+import androidx.compose.ui.tooling.preview.Preview
 import com.fahim.bingonumbercaller.ui.AnswerSheetScreen
 import com.fahim.bingonumbercaller.ui.CallerColors
 import com.fahim.bingonumbercaller.ui.CallerScreen
 import com.fahim.bingonumbercaller.ui.JoinScreen
+import com.fahim.bingonumbercaller.ui.PlatformBackHandler
 import com.fahim.bingonumbercaller.viewmodel.AnswerSheetViewModel
 import com.fahim.bingonumbercaller.viewmodel.CallerViewModel
 import com.fahim.bingonumbercaller.viewmodel.JoinViewModel
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import com.fahim.bingonumbercaller.ui.Spacing
+import com.fahim.bingonumbercaller.ui.icons.BingoIcons
+import com.fahim.bingonumbercaller.ui.icons.GameIcons
 
 enum class AppScreen {
     MODE_SELECTION,
@@ -58,6 +65,30 @@ fun App(
     answerSheetViewModel: AnswerSheetViewModel = viewModel { AnswerSheetViewModel() }
 ) {
     var currentScreen by remember { mutableStateOf(AppScreen.MODE_SELECTION) }
+
+    val goHome: () -> Unit = { currentScreen = AppScreen.MODE_SELECTION }
+    // Leaving the Caller screen must shut down the embedded server and host socket
+    val leaveCaller: () -> Unit = {
+        callerViewModel.stopServer()
+        goHome()
+    }
+
+    // Leaving the answer sheet closes the socket and stops auto-reconnect; the seat token is kept
+    val leaveAnswerSheet: () -> Unit = {
+        answerSheetViewModel.leaveGame()
+        joinViewModel.onReturnedFromGame()
+        goHome()
+    }
+
+    // System back mirrors each screen's own back control; on the home screen it exits the app
+    PlatformBackHandler(enabled = currentScreen != AppScreen.MODE_SELECTION) {
+        when (currentScreen) {
+            AppScreen.CALLER -> leaveCaller()
+            AppScreen.ANSWER_SHEET -> leaveAnswerSheet()
+            AppScreen.JOIN -> goHome()
+            AppScreen.MODE_SELECTION -> Unit
+        }
+    }
 
     MaterialTheme {
         Surface(
@@ -77,7 +108,7 @@ fun App(
                 AppScreen.CALLER -> {
                     CallerScreen(
                         viewModel = callerViewModel,
-                        onNavigateBack = { currentScreen = AppScreen.MODE_SELECTION }
+                        onNavigateBack = leaveCaller
                     )
                 }
 
@@ -86,7 +117,10 @@ fun App(
                         viewModel = joinViewModel,
                         onNavigateBack = { currentScreen = AppScreen.MODE_SELECTION },
                         onJoinSuccess = { connectionInfo ->
-                            answerSheetViewModel.connect(connectionInfo)
+                            answerSheetViewModel.connect(
+                                connectionInfo,
+                                playerName = joinViewModel.uiState.value.playerName
+                            )
                             currentScreen = AppScreen.ANSWER_SHEET
                         }
                     )
@@ -95,7 +129,7 @@ fun App(
                 AppScreen.ANSWER_SHEET -> {
                     AnswerSheetScreen(
                         viewModel = answerSheetViewModel,
-                        onNavigateBack = { currentScreen = AppScreen.MODE_SELECTION }
+                        onNavigateBack = leaveAnswerSheet
                     )
                 }
             }
@@ -119,13 +153,13 @@ private fun ModeSelectionScreen(
         Box(
             modifier = Modifier
                 .size(80.dp)
+                .shadow(12.dp, CircleShape)
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(
                         colors = listOf(CallerColors.PrimaryGlow, CallerColors.Primary)
                     )
-                )
-                .shadow(12.dp, CircleShape),
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(
@@ -159,7 +193,7 @@ private fun ModeSelectionScreen(
         ModeCard(
             title = "Host Game (Caller)",
             subtitle = "Draw numbers, run the lottery cage, and broadcast to players via QR code",
-            iconText = "🎰",
+            icon = GameIcons.Campaign,
             badgeText = "CALLER SCREEN",
             onClick = onHostSelected
         )
@@ -170,7 +204,7 @@ private fun ModeSelectionScreen(
         ModeCard(
             title = "Join Game (Player)",
             subtitle = "Scan the host's QR code, receive your 15-number ticket, and race to Full House",
-            iconText = "🎟️",
+            icon = GameIcons.ConfirmationNumber,
             badgeText = "ANSWER SHEET",
             onClick = onJoinSelected
         )
@@ -181,19 +215,19 @@ private fun ModeSelectionScreen(
 private fun ModeCard(
     title: String,
     subtitle: String,
-    iconText: String,
+    icon: ImageVector,
     badgeText: String,
     onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .shadow(6.dp, RoundedCornerShape(22.dp))
             .clip(RoundedCornerShape(22.dp))
             .background(Color.White)
-            .border(1.5.dp, Color(0xFFE2E7FF), RoundedCornerShape(22.dp))
-            .clickable { onClick() }
-            .shadow(6.dp, RoundedCornerShape(22.dp))
-            .padding(20.dp)
+            .border(1.dp, Color(0xFFE2E7FF), RoundedCornerShape(22.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(Spacing.lg + Spacing.xs)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -207,7 +241,12 @@ private fun ModeCard(
                     .background(CallerColors.SurfaceCardHigh),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = iconText, fontSize = 26.sp)
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = CallerColors.Primary,
+                    modifier = Modifier.size(28.dp)
+                )
             }
 
             Column(modifier = Modifier.weight(1f)) {
@@ -241,11 +280,57 @@ private fun ModeCard(
                 )
             }
 
-            Text(
-                text = "➔",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = CallerColors.Primary
+            Icon(
+                imageVector = BingoIcons.ArrowForward,
+                contentDescription = null,
+                tint = CallerColors.Primary,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Preview
+@Composable
+fun AppPreview() {
+    MaterialTheme {
+        Surface(color = CallerColors.Background) {
+            ModeSelectionScreen(
+                onHostSelected = {},
+                onJoinSelected = {}
+            )
+        }
+    }
+}
+
+@Preview
+@Composable
+fun ModeSelectionScreenPreview() {
+    MaterialTheme {
+        Surface(color = CallerColors.Background) {
+            ModeSelectionScreen(
+                onHostSelected = {},
+                onJoinSelected = {}
+            )
+        }
+    }
+}
+
+@Preview
+@Composable
+fun ModeCardPreview() {
+    MaterialTheme {
+        Box(
+            modifier = Modifier
+                .background(CallerColors.Background)
+                .padding(16.dp)
+        ) {
+            ModeCard(
+                title = "Host Game (Caller)",
+                subtitle = "Draw numbers, run the lottery cage, and broadcast to players via QR code",
+                icon = GameIcons.Campaign,
+                badgeText = "CALLER SCREEN",
+                onClick = {}
             )
         }
     }

@@ -14,13 +14,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -32,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -68,23 +65,7 @@ fun JoinScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                        .border(1.dp, Color(0xFFE2E8F0), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    IconButton(onClick = onNavigateBack) {
-                        Text(
-                            text = "←",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = CallerColors.TextMain
-                        )
-                    }
-                }
+                BackButton(onClick = onNavigateBack)
 
                 Text(
                     text = "Scan to Join",
@@ -99,6 +80,23 @@ fun JoinScreen(
                 fontSize = 14.sp,
                 color = CallerColors.TextMuted,
                 modifier = Modifier.fillMaxWidth()
+            )
+
+            // Name shown to the host and other players; optional, the host assigns "Player N" if blank
+            OutlinedTextField(
+                value = uiState.playerName,
+                onValueChange = { viewModel.onPlayerNameChanged(it) },
+                label = { Text("Your name") },
+                placeholder = { Text("e.g. Ann") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CallerColors.Primary,
+                    unfocusedBorderColor = Color(0xFFCBD5E1),
+                    focusedContainerColor = Color.White,
+                    unfocusedContainerColor = Color.White
+                )
             )
 
             // Error Banner

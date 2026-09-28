@@ -1,5 +1,6 @@
 package com.fahim.bingonumbercaller.server
 
+import com.fahim.bingonumbercaller.protocol.ProtocolLimits
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
@@ -15,7 +16,7 @@ fun Application.module(sessionManager: GameSessionManager = GameSessionManager()
     install(WebSockets) {
         pingPeriod = 15.seconds
         timeout = 15.seconds
-        maxFrameSize = Long.MAX_VALUE
+        maxFrameSize = ProtocolLimits.MAX_FRAME_BYTES
         masking = false
     }
 
@@ -26,6 +27,10 @@ fun Application.module(sessionManager: GameSessionManager = GameSessionManager()
     }
 }
 
+/**
+ * Standalone entry point, superseded by the embedded server. Without a host secret no
+ * connection can become host, so this is only useful for player-side smoke testing.
+ */
 fun main() {
     embeddedServer(CIO, port = 8080, module = Application::module).start(wait = true)
 }

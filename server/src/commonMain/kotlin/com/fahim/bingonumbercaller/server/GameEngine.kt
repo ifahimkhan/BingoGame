@@ -1,20 +1,39 @@
 package com.fahim.bingonumbercaller.server
 
 import com.fahim.bingonumbercaller.domain.NumberGenerator
+import com.fahim.bingonumbercaller.domain.PlayerNames
 import com.fahim.bingonumbercaller.domain.TicketGenerator
 import com.fahim.bingonumbercaller.model.GameState
 import com.fahim.bingonumbercaller.model.Ticket
 import com.fahim.bingonumbercaller.model.allNumbers
+import com.fahim.bingonumbercaller.protocol.PlayerSummary
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class GameEngine(
-    initialState: GameState = NumberGenerator.freshGame()
+    initialState: GameState = NumberGenerator.freshGame(),
+    private val maxPlayers: Int = DEFAULT_MAX_PLAYERS,
+    private val newToken: () -> String = SecureTokens::newToken
 ) {
+    /**
+     * A player's place at the table. Outlives any one socket.
+     * @property playerId public, broadcastable id (never the rejoin token).
+     * @property ticket null while the player waits for the next game after joining late.
+     */
+    private data class Seat(
+        val playerId: String,
+        val name: String,
+        val ticket: Ticket?
+    )
+
     private val mutex = Mutex()
 
     private var gameState: GameState = initialState
-    private val tickets = mutableMapOf<String, Ticket>()
+
+    // Seats keyed by the player's private rejoin token, in join order
+    private val seats = linkedMapOf<String, Seat>()
+    private val connectionToSeat = mutableMapOf<String, String>()
+    private var seatsCreated = 0
     private var hostConnectionId: String? = null
     private var status: String = "WAITING" // "WAITING", "IN_PROGRESS", "COMPLETE"
 
@@ -29,15 +48,52 @@ class GameEngine(
         return true
     }
 
-    suspend fun registerPlayer(connectionId: String): Ticket = mutex.withLock {
-        val existing = tickets[connectionId]
-        if (existing != null) {
-            return existing
+    /**
+     * Seats a player. A valid [rejoinToken] reclaims the existing seat (same ticket, same name)
+     * and moves it to [connectionId]. Otherwise a new seat is created: with a ticket before the
+     * first draw, or waiting (no ticket) once numbers have been called.
+     */
+    suspend fun registerPlayer(
+        connectionId: String,
+        rejoinToken: String?,
+        requestedName: String? = null
+    ): PlayerJoin = mutex.withLock {
+        val existing = rejoinToken?.let { seats[it] }
+        if (rejoinToken != null && existing != null) {
+            val previousConnection = connectionToSeat.entries
+                .firstOrNull { it.value == rejoinToken && it.key != connectionId }
+                ?.key
+            previousConnection?.let { connectionToSeat.remove(it) }
+            connectionToSeat[connectionId] = rejoinToken
+            return accepted(existing, rejoinToken, rejoined = true, replacedConnectionId = previousConnection)
         }
-        val ticket = TicketGenerator.generateTicket()
-        tickets[connectionId] = ticket
-        return ticket
+
+        if (seats.size >= maxPlayers) {
+            return PlayerJoin.TableFull
+        }
+
+        seatsCreated++
+        val baseName = PlayerNames.sanitize(requestedName) ?: PlayerNames.defaultName(seatsCreated)
+        val seat = Seat(
+            playerId = "p$seatsCreated",
+            name = PlayerNames.unique(baseName, seats.values.mapTo(mutableSetOf()) { it.name }),
+            ticket = if (gameState.calledNumbers.isEmpty()) TicketGenerator.generateTicket() else null
+        )
+        val token = newToken()
+        seats[token] = seat
+        connectionToSeat[connectionId] = token
+        return accepted(seat, token, rejoined = false, replacedConnectionId = null)
     }
+
+    private fun accepted(seat: Seat, token: String, rejoined: Boolean, replacedConnectionId: String?) =
+        PlayerJoin.Accepted(
+            ticket = seat.ticket,
+            rejoinToken = token,
+            rejoined = rejoined,
+            replacedConnectionId = replacedConnectionId,
+            playerId = seat.playerId,
+            playerName = seat.name
+        )
 
     suspend fun drawNumber(requesterId: String): GameState? = mutex.withLock {
         if (requesterId != hostConnectionId || status != "IN_PROGRESS") {
@@ -53,43 +109,63 @@ class GameEngine(
             return null
         }
         gameState = NumberGenerator.freshGame()
-        // Regenerate fresh tickets for any already-connected players
-        val playerIds = tickets.keys.toList()
-        for (playerId in playerIds) {
-            tickets[playerId] = TicketGenerator.generateTicket()
+        // Every seat, including late joiners and currently disconnected players, gets a fresh ticket
+        for ((token, seat) in seats.entries.toList()) {
+            seats[token] = seat.copy(ticket = TicketGenerator.generateTicket())
         }
         status = "IN_PROGRESS"
-        return gameState to tickets.toMap()
+        // Only live connections are notified now; disconnected seats receive theirs on rejoin
+        val ticketsByConnection = connectionToSeat.mapNotNull { (connectionId, token) ->
+            seats[token]?.ticket?.let { connectionId to it }
+        }.toMap()
+        return gameState to ticketsByConnection
     }
 
-    suspend fun validateClaim(connectionId: String, ticketId: String): Boolean = mutex.withLock {
+    /** Checks a Full House claim against the authoritative called numbers and this seat's ticket. */
+    suspend fun claimFullHouse(connectionId: String, ticketId: String): ClaimOutcome = mutex.withLock {
         if (status != "IN_PROGRESS") {
-            return false
+            return ClaimOutcome.NotInProgress
         }
-        val ticket = tickets[connectionId] ?: return false
+        val token = connectionToSeat[connectionId] ?: return ClaimOutcome.NotSeated
+        val seat = seats[token] ?: return ClaimOutcome.NotSeated
+        val ticket = seat.ticket ?: return ClaimOutcome.NotSeated
+        val player = summaryOf(token, seat)
         if (ticket.id != ticketId) {
-            return false
+            return ClaimOutcome.WrongTicket(player)
         }
+
         val calledSet = gameState.calledNumbers.toSet()
-        val allOnTicket = ticket.allNumbers
-        if (allOnTicket.isEmpty()) {
-            return false
-        }
-        val allCalled = allOnTicket.all { calledSet.contains(it) }
-        if (!allCalled) {
-            return false
+        val uncalled = ticket.allNumbers.filterNot { it in calledSet }.sorted()
+        if (ticket.allNumbers.isEmpty() || uncalled.isNotEmpty()) {
+            return ClaimOutcome.Incomplete(player, uncalled)
         }
 
         // Win condition verified: transition to COMPLETE immediately
         status = "COMPLETE"
-        return true
+        return ClaimOutcome.Accepted(player)
     }
+
+    suspend fun validateClaim(connectionId: String, ticketId: String): Boolean =
+        claimFullHouse(connectionId, ticketId) is ClaimOutcome.Accepted
+
+    /** Every seat in join order, with live connection and ticket status. */
+    suspend fun lobbySnapshot(): List<PlayerSummary> = mutex.withLock {
+        seats.map { (token, seat) -> summaryOf(token, seat) }
+    }
+
+    private fun summaryOf(token: String, seat: Seat) = PlayerSummary(
+        playerId = seat.playerId,
+        name = seat.name,
+        isConnected = connectionToSeat.containsValue(token),
+        hasTicket = seat.ticket != null
+    )
 
     suspend fun unregisterConnection(connectionId: String) = mutex.withLock {
         if (hostConnectionId == connectionId) {
             hostConnectionId = null
         }
-        tickets.remove(connectionId)
+        // Keep the seat so the player can rejoin with their token; only drop the socket mapping
+        connectionToSeat.remove(connectionId)
     }
 
     suspend fun getGameState(): GameState = mutex.withLock { gameState }
@@ -98,5 +174,11 @@ class GameEngine(
 
     suspend fun getHostConnectionId(): String? = mutex.withLock { hostConnectionId }
 
-    suspend fun getPlayerTicket(connectionId: String): Ticket? = mutex.withLock { tickets[connectionId] }
+    suspend fun getPlayerTicket(connectionId: String): Ticket? = mutex.withLock {
+        connectionToSeat[connectionId]?.let { seats[it]?.ticket }
+    }
+
+    companion object {
+        const val DEFAULT_MAX_PLAYERS = 100
+    }
 }

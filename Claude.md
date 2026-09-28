@@ -105,9 +105,19 @@ BingoLive/
 │       │   │   ├── JoinViewModel.kt      # player pre-join screen — scan QR, connect
 │       │   │   └── AnswerSheetViewModel.kt  # player screen, once connected
 │       │   └── ui/
-│       │       ├── CallerScreen.kt
+│       │       ├── CallerScreen.kt            # host screen layout only; parts below
+│       │       ├── CallerColors.kt            # shared palette + ball colours/letters
+│       │       ├── CallerHeader.kt            # header bar, progress card
+│       │       ├── HeroBallStage.kt           # current-ball stage, draw button
+│       │       ├── CallHistory.kt             # history modes, column counts, 1-90 grid
+│       │       ├── CallerCards.kt             # reset dialog, error card, winner card
+│       │       ├── HostQrSection.kt           # start/stop hosting, QR canvas
+│       │       ├── HostLobbyCards.kt          # lobby list, false-claim notice
 │       │       ├── JoinScreen.kt
-│       │       └── AnswerSheetScreen.kt
+│       │       ├── AnswerSheetScreen.kt       # player screen layout only; parts below
+│       │       ├── AnswerSheetBanners.kt      # header, connection/feedback/result banners
+│       │       ├── CalledNumbersDisplay.kt    # current number, called-numbers strip
+│       │       └── TicketCard.kt              # 9x3 ticket, cells, claim button
 │       ├── androidMain/kotlin/.../connection/QrScanner.android.kt   # CameraX + ML Kit
 │       │   .../network/LocalIpProvider.android.kt
 │       └── iosMain/kotlin/.../connection/QrScanner.ios.kt           # AVFoundation
@@ -155,9 +165,30 @@ BingoLive/
   can never be a rules mismatch between them.
 - **Draw and reset are host-privileged actions.** Only the connection that opened the host
   session may trigger `DrawNumber` / `NewGame`; player connections can only send `ClaimFullHouse`.
+- **Host auth uses a private host secret, never the QR token.** The embedded server generates a
+  256-bit `hostSecret` (SecureRandom) that stays in the host app; `JoinAsHost` must carry it.
+  The host socket connects over loopback (`127.0.0.1`). An empty secret disables host joins.
+  All WebSocket frames are capped at `ProtocolLimits.MAX_FRAME_BYTES` on both server and client.
+- **Seats outlive sockets.** Each player gets a private `rejoinToken` (SecureRandom) in `Joined`;
+  tickets are keyed by token, not connection. A dropped player rejoins with the token and gets the
+  same ticket (the old socket is closed). Players who join after the first draw are seated with no
+  ticket and receive one at the next new game. `JoinRejected` is terminal: clients must not retry.
+- **Names, lobby, false claims.** Player names are cleaned by `PlayerNames` (shared) and made
+  unique server-side; a rejoin keeps the original name. `LobbyUpdate` broadcasts `PlayerSummary`
+  (public `playerId`, never the rejoin token). A claim while ticket numbers are uncalled sends the
+  claimer `ClaimRejected` and the host `FalseClaim` with the uncalled numbers; a claim that lost a
+  race after someone won (`ClaimOutcome.NotInProgress`) is not reported as false.
+- **Auto-call and voice are host-side conveniences.** `AutoCaller` only sends the same `DrawNumber`
+  intent on a timer (3/5/8/12 s); it stops on a win, full board, new game or hosting ending, and
+  pauses on a `FalseClaim`. Numbers are spoken (`SpeechAnnouncer`, phrases in `BingoCallPhrases`)
+  only for server-confirmed draws, never for a rejected request.
 - **The server is embedded in the host's own app process**, not a separately deployed service.
   Starting a game = starting the embedded server + binding it to the phone's local IP; closing
   the Caller screen or app should cleanly stop the server.
+  On Android, hosting runs under `HostingService` (foreground service, type `connectedDevice`,
+  Wi-Fi + partial wake lock) started/stopped by `EmbeddedGameServer`. Its notification's
+  "Stop hosting" action and swiping the app from recents both end the game; the Caller screen
+  follows via `GameServerHost.isRunning`.
 - **QR is a connection-info carrier, not a trust mechanism.** The QR payload only tells a client
   where to connect (IP, port, a session token to avoid joining a stale/wrong server on the same
   network) — it grants no special privileges. All the same server-side validation from the
@@ -203,6 +234,10 @@ Standard 90-ball bingo ticket: **9 columns × 3 rows, 15 numbers, 12 blanks.**
 - Use `StateFlow` + `collectAsStateWithLifecycle()`, not `collectAsState()`
 - Show only changed/created files in output
 - Keep explanations to 2–3 sentences max
+
+- UI icons come from `ui/icons` (`BingoIcons`, `GameIcons`: Material Rounded path data, no icon
+  library dependency). Never use emoji or text glyphs as icons. Use `CircleIconButton`/`BackButton`,
+  `StatusBanner`, `CelebrationCard`, `IconLabel` and the `Spacing` scale from `ui/CommonComponents.kt`.
 
 ### Never
 - Rewrite unrelated code

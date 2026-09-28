@@ -1,9 +1,10 @@
 package com.fahim.bingonumbercaller.network
 
-import com.fahim.bingonumbercaller.model.ConnectionInfo
+import kotlinx.coroutines.flow.StateFlow
 
-expect class EmbeddedGameServer() {
-    val isSupported: Boolean
-    fun start(port: Int = 8080): ConnectionInfo
-    fun stop()
+expect class EmbeddedGameServer() : GameServerHost {
+    override val isSupported: Boolean
+    override val isRunning: StateFlow<Boolean>
+    override fun start(port: Int): HostSession
+    override fun stop()
 }
