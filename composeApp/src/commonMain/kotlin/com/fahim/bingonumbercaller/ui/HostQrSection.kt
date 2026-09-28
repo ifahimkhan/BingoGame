@@ -97,10 +97,10 @@ internal fun MultiplayerHostSection(
                                 .background(CallerColors.ActiveGreen)
                         )
                         Text(
-                            text = "LOBBY ACTIVE (SCAN TO JOIN)",
+                            text = "LOBBY ACTIVE",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Black,
-                            color = CallerColors.ActiveGreen
+                            color = CallerColors.ActiveGreen,
                         )
                     }
 
