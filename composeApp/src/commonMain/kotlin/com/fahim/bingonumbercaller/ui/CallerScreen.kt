@@ -35,6 +35,9 @@ fun CallerScreen(
 
     val scrollState = rememberScrollState()
 
+    // The host phone must not auto-lock mid-game: a locked screen throttles Wi-Fi and players stop getting numbers
+    KeepScreenOn()
+
     Surface(
         modifier = modifier.fillMaxSize(),
         color = CallerColors.Background
@@ -66,6 +69,12 @@ fun CallerScreen(
             // Winner Banner
             if (uiState.winnerConnectionId != null) {
                 WinnerCard(winnerName = uiState.winnerName ?: "A player")
+                MissedWinCard(prizeName = "Full House", missedBy = uiState.fullHouseMissedBy)
+            }
+
+            uiState.lineWinnerName?.let { lineWinner ->
+                LineWinnerCard(winnerName = lineWinner)
+                MissedWinCard(prizeName = "the line", missedBy = uiState.lineMissedBy)
             }
 
             // Bogus Full House call, for the caller to announce

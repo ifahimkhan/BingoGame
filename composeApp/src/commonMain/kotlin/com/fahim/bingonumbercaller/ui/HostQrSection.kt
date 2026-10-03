@@ -163,7 +163,7 @@ fun QrCodeCanvas(
 
     Canvas(modifier = modifier) {
         drawRect(color = Color.White, size = size)
-        val cellWidth = size.width / totalCols
+    val cellWidth = size.width / totalCols
         val cellHeight = size.height / totalRows
         for (r in 0 until matrixRows) {
             for (c in 0 until matrixCols) {

@@ -34,7 +34,15 @@ sealed class ClientMessage {
 
     @Serializable
     data class ClaimFullHouse(val ticketId: String) : ClientMessage()
+
+    /** Claims the line prize: any one horizontal row of [ticketId] fully called. */
+    @Serializable
+    data class ClaimLine(val ticketId: String) : ClientMessage()
 }
+
+/** Prizes a game pays out. The line goes to the first valid claim; the game then continues. */
+@Serializable
+enum class Prize { LINE, FULL_HOUSE }
 
 @Serializable
 sealed class ServerMessage {
@@ -43,34 +51,54 @@ sealed class ServerMessage {
      *   ticket via another [Joined] when the host starts a new game.
      * @property rejoinToken private seat token for players; keep it to reclaim the seat.
      * @property playerName the name the server actually assigned (cleaned, de-duplicated).
+     * @property playerId this seat's public id, so a player can find itself in [LineWon] / [GameOver].
      */
     @Serializable
     data class Joined(
         val ticket: Ticket?,
         val role: String,
         val rejoinToken: String? = null,
-        val playerName: String? = null
+        val playerName: String? = null,
+        val playerId: String? = null
     ) : ServerMessage()
 
     /** Join refused for good (wrong game session, table full). Clients must not auto-retry. */
     @Serializable
     data class JoinRejected(val reason: String) : ServerMessage()
 
+    /** @property lineWinnerName who took the line prize this game; null while it is still open. */
     @Serializable
     data class GameStateUpdate(
         val calledNumbers: List<Int>,
         val currentNumber: Int?,
         val remainingCount: Int,
-        val status: String
+        val status: String,
+        val lineWinnerName: String? = null
     ) : ServerMessage()
 
     @Serializable
-    data class ClaimRejected(val reason: String) : ServerMessage()
+    data class ClaimRejected(val reason: String, val prize: Prize = Prize.FULL_HOUSE) : ServerMessage()
 
+    /**
+     * @property missedBy other players whose whole ticket was also called but who didn't claim first.
+     */
     @Serializable
     data class GameOver(
         val winnerConnectionId: String,
-        val winnerName: String? = null
+        val winnerName: String? = null,
+        val winnerPlayerId: String? = null,
+        val missedBy: List<PlayerRef> = emptyList()
+    ) : ServerMessage()
+
+    /**
+     * Line prize awarded; the game carries on to Full House.
+     * @property missedBy other players who also had a fully called row but didn't claim first.
+     */
+    @Serializable
+    data class LineWon(
+        val winnerPlayerId: String,
+        val winnerName: String,
+        val missedBy: List<PlayerRef> = emptyList()
     ) : ServerMessage()
 
     /** Everyone seated at the table. Broadcast whenever someone joins, leaves, or gets a ticket. */
@@ -78,14 +106,15 @@ sealed class ServerMessage {
     data class LobbyUpdate(val players: List<PlayerSummary>) : ServerMessage()
 
     /**
-     * Host only: a player claimed Full House while numbers on their ticket were still uncalled.
+     * Host only: a player claimed a prize while numbers on their ticket were still uncalled.
      * The caller can announce the bogus claim, as in a live game.
      */
     @Serializable
     data class FalseClaim(
         val playerId: String,
         val playerName: String,
-        val uncalledNumbers: List<Int>
+        val uncalledNumbers: List<Int>,
+        val prize: Prize = Prize.FULL_HOUSE
     ) : ServerMessage()
 
     @Serializable
@@ -103,3 +132,7 @@ data class PlayerSummary(
     val isConnected: Boolean,
     val hasTicket: Boolean
 )
+
+/** Public name tag for a player, e.g. in the list of players who missed a prize. */
+@Serializable
+data class PlayerRef(val playerId: String, val name: String)

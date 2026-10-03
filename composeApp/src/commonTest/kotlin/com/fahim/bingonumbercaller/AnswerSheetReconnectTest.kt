@@ -38,6 +38,7 @@ private class FakePlayerConnection : PlayerConnection {
     }
 
     override suspend fun claimFullHouse(ticketId: String) = Unit
+    override suspend fun claimLine(ticketId: String) = Unit
 
     override suspend fun disconnect() {
         isConnected.value = false

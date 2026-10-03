@@ -3,9 +3,11 @@ package com.fahim.bingonumbercaller.server
 import com.fahim.bingonumbercaller.domain.NumberGenerator
 import com.fahim.bingonumbercaller.domain.PlayerNames
 import com.fahim.bingonumbercaller.domain.TicketGenerator
+import com.fahim.bingonumbercaller.domain.WinRules
 import com.fahim.bingonumbercaller.model.GameState
 import com.fahim.bingonumbercaller.model.Ticket
 import com.fahim.bingonumbercaller.model.allNumbers
+import com.fahim.bingonumbercaller.protocol.PlayerRef
 import com.fahim.bingonumbercaller.protocol.PlayerSummary
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +38,7 @@ class GameEngine(
     private var seatsCreated = 0
     private var hostConnectionId: String? = null
     private var status: String = "WAITING" // "WAITING", "IN_PROGRESS", "COMPLETE"
+    private var lineWinnerName: String? = null
 
     suspend fun registerHost(connectionId: String): Boolean = mutex.withLock {
         if (hostConnectionId != null && hostConnectionId != connectionId) {
@@ -109,6 +112,7 @@ class GameEngine(
             return null
         }
         gameState = NumberGenerator.freshGame()
+        lineWinnerName = null
         // Every seat, including late joiners and currently disconnected players, gets a fresh ticket
         for ((token, seat) in seats.entries.toList()) {
             seats[token] = seat.copy(ticket = TicketGenerator.generateTicket())
@@ -135,15 +139,45 @@ class GameEngine(
         }
 
         val calledSet = gameState.calledNumbers.toSet()
-        val uncalled = ticket.allNumbers.filterNot { it in calledSet }.sorted()
-        if (ticket.allNumbers.isEmpty() || uncalled.isNotEmpty()) {
-            return ClaimOutcome.Incomplete(player, uncalled)
+        if (!WinRules.isFullHouse(ticket, calledSet)) {
+            return ClaimOutcome.Incomplete(player, ticket.allNumbers.filterNot { it in calledSet }.sorted())
         }
 
         // Win condition verified: transition to COMPLETE immediately
         status = "COMPLETE"
-        return ClaimOutcome.Accepted(player)
+        return ClaimOutcome.Accepted(player, missedBy = othersQualifying(token) { WinRules.isFullHouse(it, calledSet) })
     }
+
+    /**
+     * Checks a line claim: any one row of this seat's ticket fully called. Only the first valid
+     * claim wins; the game stays in progress for Full House.
+     */
+    suspend fun claimLine(connectionId: String, ticketId: String): ClaimOutcome = mutex.withLock {
+        if (status != "IN_PROGRESS") {
+            return ClaimOutcome.NotInProgress
+        }
+        lineWinnerName?.let { return ClaimOutcome.PrizeTaken(it) }
+        val token = connectionToSeat[connectionId] ?: return ClaimOutcome.NotSeated
+        val seat = seats[token] ?: return ClaimOutcome.NotSeated
+        val ticket = seat.ticket ?: return ClaimOutcome.NotSeated
+        val player = summaryOf(token, seat)
+        if (ticket.id != ticketId) {
+            return ClaimOutcome.WrongTicket(player)
+        }
+
+        val calledSet = gameState.calledNumbers.toSet()
+        if (!WinRules.hasCompletedRow(ticket, calledSet)) {
+            return ClaimOutcome.Incomplete(player, WinRules.closestRowMissing(ticket, calledSet))
+        }
+
+        lineWinnerName = seat.name
+        return ClaimOutcome.Accepted(player, missedBy = othersQualifying(token) { WinRules.hasCompletedRow(it, calledSet) })
+    }
+
+    /** Seats other than [winnerToken] whose ticket also met the prize condition: they missed it. */
+    private fun othersQualifying(winnerToken: String, qualifies: (Ticket) -> Boolean): List<PlayerRef> =
+        seats.filter { (token, seat) -> token != winnerToken && seat.ticket?.let(qualifies) == true }
+            .map { (_, seat) -> PlayerRef(seat.playerId, seat.name) }
 
     suspend fun validateClaim(connectionId: String, ticketId: String): Boolean =
         claimFullHouse(connectionId, ticketId) is ClaimOutcome.Accepted
@@ -171,6 +205,8 @@ class GameEngine(
     suspend fun getGameState(): GameState = mutex.withLock { gameState }
 
     suspend fun getStatus(): String = mutex.withLock { status }
+
+    suspend fun getLineWinnerName(): String? = mutex.withLock { lineWinnerName }
 
     suspend fun getHostConnectionId(): String? = mutex.withLock { hostConnectionId }
 

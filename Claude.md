@@ -178,6 +178,15 @@ BingoLive/
   (public `playerId`, never the rejoin token). A claim while ticket numbers are uncalled sends the
   claimer `ClaimRejected` and the host `FalseClaim` with the uncalled numbers; a claim that lost a
   race after someone won (`ClaimOutcome.NotInProgress`) is not reported as false.
+- **Line prize and missed wins.** `ClaimLine` wins if any one ticket row is fully called (rules in
+  shared `WinRules`); first valid claim takes it, the game continues to Full House. `LineWon` /
+  `GameOver` carry `missedBy`: other seats that also qualified but didn't claim first. Players learn
+  their own `playerId` from `Joined` to recognise themselves. `GameStateUpdate.lineWinnerName` keeps
+  late/rejoining clients in sync.
+- **Connectivity.** Caller and answer-sheet screens keep the display on (`KeepScreenOn`); a locked
+  phone throttles Wi-Fi. Server sends are parallel with a 5 s deadline and a stuck socket is
+  cancelled (client rejoins and gets full state). Client connect is bounded (8 s) and reconnects
+  immediately on app foreground.
 - **Auto-call and voice are host-side conveniences.** `AutoCaller` only sends the same `DrawNumber`
   intent on a timer (3/5/8/12 s); it stops on a win, full board, new game or hosting ending, and
   pauses on a `FalseClaim`. Numbers are spoken (`SpeechAnnouncer`, phrases in `BingoCallPhrases`)

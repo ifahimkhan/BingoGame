@@ -2,11 +2,14 @@ package com.fahim.bingonumbercaller.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.fahim.bingonumbercaller.domain.WinRules
 import com.fahim.bingonumbercaller.model.ConnectionInfo
 import com.fahim.bingonumbercaller.model.Ticket
 import com.fahim.bingonumbercaller.model.allNumbers
+import com.fahim.bingonumbercaller.network.ConnectErrorMessages
 import com.fahim.bingonumbercaller.network.GameSocketClient
 import com.fahim.bingonumbercaller.network.PlayerConnection
+import com.fahim.bingonumbercaller.protocol.Prize
 import com.fahim.bingonumbercaller.protocol.ServerMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -17,8 +20,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** How the line prize went for this player, once someone has won it. */
+enum class LineOutcome {
+    WON,
+
+    /** This player also had a fully called row but someone else claimed first. */
+    MISSED,
+
+    /** Someone else won and this player had no complete row. */
+    LOST
+}
+
 data class AnswerSheetUiState(
     val ticket: Ticket? = null,
+    val playerId: String? = null,
     val calledNumbers: List<Int> = emptyList(),
     val currentNumber: Int? = null,
     val gameStatus: String = "WAITING",
@@ -31,7 +46,12 @@ data class AnswerSheetUiState(
     val isWaitingForNextGame: Boolean = false,
     val errorMessage: String? = null,
     val userCheckedNumbers: Set<Int> = emptySet(),
-    val feedbackMessage: String? = null
+    val feedbackMessage: String? = null,
+    val lineWinnerName: String? = null,
+    val lineOutcome: LineOutcome? = null,
+    val isLineClaimPending: Boolean = false,
+    // Every number on this ticket was called but another player claimed Full House first
+    val missedFullHouse: Boolean = false
 ) {
     // Only numbers that the player manually checked AND that have actually been called by the server
     val markedNumbers: Set<Int>
@@ -41,6 +61,14 @@ data class AnswerSheetUiState(
         get() = ticket != null && ticket.allNumbers.isNotEmpty() &&
                 markedNumbers.size == ticket.allNumbers.size &&
                 ticket.allNumbers.all { markedNumbers.contains(it) }
+
+    /** Rows the player has fully marked; only called numbers count as marked. */
+    val completedRows: List<Int>
+        get() = ticket?.let { WinRules.completedRows(it, markedNumbers) }.orEmpty()
+
+    val canClaimLine: Boolean
+        get() = completedRows.isNotEmpty() && lineWinnerName == null && !isLineClaimPending &&
+                gameStatus != STATUS_COMPLETE
 
     fun isNumberCalled(num: Int): Boolean = calledNumbers.contains(num)
 
@@ -52,6 +80,17 @@ internal fun reconnectDelayMillis(attempt: Int): Long =
     (1_000L shl attempt.coerceAtMost(4)).coerceAtMost(MAX_RECONNECT_DELAY_MILLIS)
 
 private const val MAX_RECONNECT_DELAY_MILLIS = 10_000L
+private const val STATUS_COMPLETE = "COMPLETE"
+private const val FEEDBACK_MILLIS = 2_000L
+private const val CLAIM_REJECTED_MILLIS = 3_500L
+
+/** Line state for a fresh ticket / new game. */
+private fun AnswerSheetUiState.withLineReset() = copy(
+    lineWinnerName = null,
+    lineOutcome = null,
+    isLineClaimPending = false,
+    missedFullHouse = false
+)
 
 class AnswerSheetViewModel(
     private val connection: PlayerConnection = GameSocketClient()
@@ -114,7 +153,7 @@ class AnswerSheetViewModel(
                 throw e
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(errorMessage = "Failed to connect to host: ${e.message ?: "network error"}")
+                    it.copy(errorMessage = ConnectErrorMessages.forPlayer(e, connectionInfo))
                 }
             }
         }
@@ -136,15 +175,28 @@ class AnswerSheetViewModel(
         reconnectJob = null
     }
 
-    private fun scheduleReconnect() {
+    /**
+     * The app came back to the foreground (screen unlocked, app reopened). If the socket died
+     * while we were away, retry now instead of waiting out the backoff.
+     */
+    fun onAppForegrounded() {
+        if (!shouldStayConnected || !hasJoined || connection.isConnected.value) return
+        reconnectJob?.cancel()
+        reconnectJob = null
+        scheduleReconnect(immediately = true)
+    }
+
+    private fun scheduleReconnect(immediately: Boolean = false) {
         if (reconnectJob?.isActive == true) return
         val game = activeGame ?: return
 
         reconnectJob = viewModelScope.launch {
             _uiState.update { it.copy(isReconnecting = true) }
             var attempt = 0
+            var waitFirst = !immediately
             while (shouldStayConnected && !connection.isConnected.value) {
-                delay(reconnectDelayMillis(attempt++))
+                if (waitFirst) delay(reconnectDelayMillis(attempt++))
+                waitFirst = true
                 if (!shouldStayConnected) break
                 try {
                     connection.connectAsPlayer(game, rejoinToken, requestedName)
@@ -172,10 +224,12 @@ class AnswerSheetViewModel(
             is ServerMessage.GameStateUpdate -> {
                 _uiState.update { current ->
                     val isNewGame = message.calledNumbers.isEmpty() && current.calledNumbers.isNotEmpty()
-                    current.copy(
+                    val base = if (isNewGame) current.withLineReset() else current
+                    base.copy(
                         calledNumbers = message.calledNumbers,
                         currentNumber = message.currentNumber,
                         gameStatus = message.status,
+                        lineWinnerName = message.lineWinnerName,
                         userCheckedNumbers = if (isNewGame) emptySet() else current.userCheckedNumbers,
                         claimResult = if (isNewGame) null else current.claimResult,
                         winnerName = if (isNewGame) null else current.winnerName
@@ -186,21 +240,33 @@ class AnswerSheetViewModel(
             is ServerMessage.GameOver -> {
                 _uiState.update { current ->
                     val wasPending = current.claimResult == "pending"
+                    val isMe = current.playerId != null && current.playerId == message.winnerPlayerId
                     current.copy(
-                        gameStatus = "COMPLETE",
+                        gameStatus = STATUS_COMPLETE,
                         winnerConnectionId = message.winnerConnectionId,
                         winnerName = message.winnerName,
-                        claimResult = if (wasPending) "won" else "game_over"
+                        claimResult = if (wasPending || isMe) "won" else "game_over",
+                        missedFullHouse = message.missedBy.any { it.playerId == current.playerId },
+                        isLineClaimPending = false
                     )
                 }
             }
 
-            is ServerMessage.ClaimRejected -> {
-                _uiState.update { it.copy(claimResult = "rejected: ${message.reason}") }
-                viewModelScope.launch {
-                    delay(3500)
-                    if (_uiState.value.claimResult?.startsWith("rejected") == true) {
-                        _uiState.update { it.copy(claimResult = null) }
+            is ServerMessage.LineWon -> onLineWon(message)
+
+            is ServerMessage.ClaimRejected -> when (message.prize) {
+                Prize.LINE -> {
+                    _uiState.update { it.copy(isLineClaimPending = false) }
+                    showFeedback(message.reason, CLAIM_REJECTED_MILLIS)
+                }
+
+                Prize.FULL_HOUSE -> {
+                    _uiState.update { it.copy(claimResult = "rejected: ${message.reason}") }
+                    viewModelScope.launch {
+                        delay(CLAIM_REJECTED_MILLIS)
+                        if (_uiState.value.claimResult?.startsWith("rejected") == true) {
+                            _uiState.update { it.copy(claimResult = null) }
+                        }
                     }
                 }
             }
@@ -214,6 +280,22 @@ class AnswerSheetViewModel(
         }
     }
 
+    private fun onLineWon(message: ServerMessage.LineWon) {
+        _uiState.update { current ->
+            val me = current.playerId
+            val outcome = when {
+                me != null && me == message.winnerPlayerId -> LineOutcome.WON
+                message.missedBy.any { it.playerId == me } -> LineOutcome.MISSED
+                else -> LineOutcome.LOST
+            }
+            current.copy(
+                lineWinnerName = message.winnerName,
+                lineOutcome = outcome,
+                isLineClaimPending = false
+            )
+        }
+    }
+
     private fun onJoined(message: ServerMessage.Joined) {
         hasJoined = true
         message.rejoinToken?.let { rejoinToken = it }
@@ -223,8 +305,10 @@ class AnswerSheetViewModel(
             val sameTicket = current.ticket != null && current.ticket.id == message.ticket?.id
             // A claim in flight when the socket dropped may never have arrived; let the player retry
             val keptClaim = current.claimResult.takeIf { sameTicket && it != "pending" }
-            current.copy(
+            val base = if (sameTicket) current.copy(isLineClaimPending = false) else current.withLineReset()
+            base.copy(
                 ticket = message.ticket,
+                playerId = message.playerId ?: current.playerId,
                 playerName = message.playerName ?: current.playerName,
                 userCheckedNumbers = if (sameTicket) current.userCheckedNumbers else emptySet(),
                 claimResult = keptClaim,
@@ -244,14 +328,7 @@ class AnswerSheetViewModel(
 
         // Verify if the number has actually been called by the server
         if (!currentState.calledNumbers.contains(number)) {
-            val feedback = "Number $number hasn't been called yet!"
-            _uiState.update { it.copy(feedbackMessage = feedback) }
-            viewModelScope.launch {
-                delay(2000)
-                if (_uiState.value.feedbackMessage == feedback) {
-                    _uiState.update { it.copy(feedbackMessage = null) }
-                }
-            }
+            showFeedback("Number $number hasn't been called yet!", FEEDBACK_MILLIS)
             return
         }
 
@@ -261,6 +338,27 @@ class AnswerSheetViewModel(
                 userCheckedNumbers = if (number in checked) checked - number else checked + number,
                 feedbackMessage = null
             )
+        }
+    }
+
+    private fun showFeedback(feedback: String, millis: Long) {
+        _uiState.update { it.copy(feedbackMessage = feedback) }
+        viewModelScope.launch {
+            delay(millis)
+            if (_uiState.value.feedbackMessage == feedback) {
+                _uiState.update { it.copy(feedbackMessage = null) }
+            }
+        }
+    }
+
+    /** Sends a line claim when a row is fully marked. The server re-checks it against called numbers. */
+    fun onClaimLineTapped() {
+        val currentState = _uiState.value
+        val ticket = currentState.ticket ?: return
+        if (!currentState.canClaimLine) return
+        _uiState.update { it.copy(isLineClaimPending = true) }
+        viewModelScope.launch {
+            connection.claimLine(ticket.id)
         }
     }
 

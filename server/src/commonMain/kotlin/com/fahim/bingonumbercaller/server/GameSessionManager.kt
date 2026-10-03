@@ -2,17 +2,23 @@ package com.fahim.bingonumbercaller.server
 
 import com.fahim.bingonumbercaller.model.GameState
 import com.fahim.bingonumbercaller.protocol.ClientMessage
+import com.fahim.bingonumbercaller.protocol.Prize
 import com.fahim.bingonumbercaller.protocol.ServerMessage
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlin.random.Random
@@ -112,7 +118,8 @@ class GameSessionManager(
                                 ticket = join.ticket,
                                 role = "PLAYER",
                                 rejoinToken = join.rejoinToken,
-                                playerName = join.playerName
+                                playerName = join.playerName,
+                                playerId = join.playerId
                             )
                         )
                         sendCurrentGameState(session)
@@ -138,12 +145,10 @@ class GameSessionManager(
                 if (result != null) {
                     val (newState, newTickets) = result
                     // Notify each player of their new ticket
-                    sessionsMutex.withLock {
-                        for ((playerId, newTicket) in newTickets) {
-                            val playerSession = sessions[playerId]
-                            if (playerSession != null) {
-                                sendMessage(playerSession, ServerMessage.Joined(ticket = newTicket, role = "PLAYER"))
-                            }
+                    val liveSessions = sessionsMutex.withLock { sessions.toMap() }
+                    for ((connection, newTicket) in newTickets) {
+                        liveSessions[connection]?.let {
+                            sendMessage(it, ServerMessage.Joined(ticket = newTicket, role = "PLAYER"))
                         }
                     }
                     broadcastGameState(newState)
@@ -154,38 +159,74 @@ class GameSessionManager(
                 }
             }
 
-            is ClientMessage.ClaimFullHouse -> handleClaim(connectionId, session, message.ticketId)
+            is ClientMessage.ClaimFullHouse -> handleClaim(
+                connectionId, session, Prize.FULL_HOUSE, gameEngine.claimFullHouse(connectionId, message.ticketId)
+            )
+
+            is ClientMessage.ClaimLine -> handleClaim(
+                connectionId, session, Prize.LINE, gameEngine.claimLine(connectionId, message.ticketId)
+            )
         }
     }
 
-    private suspend fun handleClaim(connectionId: String, session: WebSocketSession, ticketId: String) {
-        when (val outcome = gameEngine.claimFullHouse(connectionId, ticketId)) {
-            is ClaimOutcome.Accepted -> {
-                broadcast(ServerMessage.GameOver(winnerConnectionId = connectionId, winnerName = outcome.player.name))
-            }
+    private suspend fun handleClaim(
+        connectionId: String,
+        session: WebSocketSession,
+        prize: Prize,
+        outcome: ClaimOutcome
+    ) {
+        when (outcome) {
+            is ClaimOutcome.Accepted -> broadcast(
+                when (prize) {
+                    Prize.FULL_HOUSE -> ServerMessage.GameOver(
+                        winnerConnectionId = connectionId,
+                        winnerName = outcome.player.name,
+                        winnerPlayerId = outcome.player.playerId,
+                        missedBy = outcome.missedBy
+                    )
+
+                    Prize.LINE -> ServerMessage.LineWon(
+                        winnerPlayerId = outcome.player.playerId,
+                        winnerName = outcome.player.name,
+                        missedBy = outcome.missedBy
+                    )
+                }
+            )
 
             is ClaimOutcome.Incomplete -> {
-                sendMessage(session, ServerMessage.ClaimRejected("Not all of your numbers have been called yet."))
+                val reason = when (prize) {
+                    Prize.FULL_HOUSE -> "Not all of your numbers have been called yet."
+                    Prize.LINE -> "None of your rows is fully called yet."
+                }
+                sendMessage(session, ServerMessage.ClaimRejected(reason, prize))
                 // Bogus call: let the caller announce it
                 sendToHost(
                     ServerMessage.FalseClaim(
                         playerId = outcome.player.playerId,
                         playerName = outcome.player.name,
-                        uncalledNumbers = outcome.uncalledNumbers
+                        uncalledNumbers = outcome.uncalledNumbers,
+                        prize = prize
                     )
                 )
             }
 
             is ClaimOutcome.WrongTicket -> {
-                sendMessage(session, ServerMessage.ClaimRejected("That ticket isn't yours for this game."))
+                sendMessage(session, ServerMessage.ClaimRejected("That ticket isn't yours for this game.", prize))
             }
 
             is ClaimOutcome.NotInProgress -> {
-                sendMessage(session, ServerMessage.ClaimRejected("The game isn't in progress. Someone may have already won."))
+                sendMessage(
+                    session,
+                    ServerMessage.ClaimRejected("The game isn't in progress. Someone may have already won.", prize)
+                )
+            }
+
+            is ClaimOutcome.PrizeTaken -> {
+                sendMessage(session, ServerMessage.ClaimRejected("${outcome.winnerName} already won the line.", prize))
             }
 
             is ClaimOutcome.NotSeated -> {
-                sendMessage(session, ServerMessage.ClaimRejected("You don't have a ticket in this game."))
+                sendMessage(session, ServerMessage.ClaimRejected("You don't have a ticket in this game.", prize))
             }
         }
     }
@@ -201,47 +242,60 @@ class GameSessionManager(
     }
 
     private suspend fun sendCurrentGameState(session: WebSocketSession) {
-        val state = gameEngine.getGameState()
-        val status = gameEngine.getStatus()
-        val update = ServerMessage.GameStateUpdate(
-            calledNumbers = state.calledNumbers,
-            currentNumber = state.calledNumbers.lastOrNull(),
-            remainingCount = state.remainingPool.size,
-            status = status
-        )
-        sendMessage(session, update)
+        sendMessage(session, stateUpdate(gameEngine.getGameState()))
     }
 
     private suspend fun broadcastGameState(state: GameState) {
-        val status = gameEngine.getStatus()
-        val update = ServerMessage.GameStateUpdate(
-            calledNumbers = state.calledNumbers,
-            currentNumber = state.calledNumbers.lastOrNull(),
-            remainingCount = state.remainingPool.size,
-            status = status
-        )
-        broadcast(update)
+        broadcast(stateUpdate(state))
     }
 
+    private suspend fun stateUpdate(state: GameState) = ServerMessage.GameStateUpdate(
+        calledNumbers = state.calledNumbers,
+        currentNumber = state.calledNumbers.lastOrNull(),
+        remainingCount = state.remainingPool.size,
+        status = gameEngine.getStatus(),
+        lineWinnerName = gameEngine.getLineWinnerName()
+    )
+
+    /**
+     * Sends to every socket in parallel, each with a deadline: one stalled phone (screen off,
+     * Wi-Fi asleep) must never hold up the numbers for everyone else.
+     */
     suspend fun broadcast(message: ServerMessage) {
         val activeSessions = sessionsMutex.withLock { sessions.values.toList() }
         val text = json.encodeToString(message)
-        for (session in activeSessions) {
-            try {
-                session.send(Frame.Text(text))
-            } catch (e: Exception) {
-                // Ignore send failures on stale sessions
+        coroutineScope {
+            for (session in activeSessions) {
+                launch { sendOrDrop(session, text) }
             }
         }
     }
 
     private suspend fun sendMessage(session: WebSocketSession, message: ServerMessage) {
-        try {
-            val text = json.encodeToString(message)
-            session.send(Frame.Text(text))
+        sendOrDrop(session, json.encodeToString(message))
+    }
+
+    /**
+     * A socket that can't take a frame within [SEND_TIMEOUT_MILLIS] is dead or stuck. Cancel it
+     * so its handler cleans up; the player's client reconnects and gets the full state on rejoin.
+     */
+    private suspend fun sendOrDrop(session: WebSocketSession, text: String) {
+        val sent = try {
+            withTimeoutOrNull(SEND_TIMEOUT_MILLIS) { session.send(Frame.Text(text)) } != null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            // Ignore send failures
+            false
         }
+        // Never drop the host: its loopback socket has no reconnect loop and is needed to draw
+        if (!sent && !isHostSession(session)) {
+            session.cancel()
+        }
+    }
+
+    private suspend fun isHostSession(session: WebSocketSession): Boolean {
+        val hostId = gameEngine.getHostConnectionId() ?: return false
+        return sessionsMutex.withLock { sessions[hostId] } === session
     }
 
     private suspend fun rejectJoin(session: WebSocketSession, reason: String) {
@@ -265,6 +319,10 @@ class GameSessionManager(
     private fun generateConnectionId(): String {
         val randomHex = Random.nextInt(0, 0xFFFFFF).toString(16).padStart(6, '0')
         return "conn-$randomHex"
+    }
+
+    private companion object {
+        const val SEND_TIMEOUT_MILLIS = 5_000L
     }
 }
 

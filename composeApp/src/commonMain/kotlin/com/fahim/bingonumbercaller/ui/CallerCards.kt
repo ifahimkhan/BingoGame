@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.fahim.bingonumbercaller.protocol.PlayerRef
 import com.fahim.bingonumbercaller.ui.icons.GameIcons
 
 @Composable
@@ -71,5 +72,24 @@ internal fun WinnerCard(winnerName: String) {
         title = "FULL HOUSE CLAIMED!",
         subtitle = "Winner: $winnerName",
         icon = GameIcons.EmojiEvents
+    )
+}
+
+@Composable
+internal fun LineWinnerCard(winnerName: String) {
+    StatusBanner(
+        message = "Line won by $winnerName. Play on for Full House.",
+        tone = BannerTone.Success,
+        icon = GameIcons.EmojiEvents
+    )
+}
+
+/** Players who had the prize on their ticket but didn't claim before the winner, so the caller can call it out. */
+@Composable
+internal fun MissedWinCard(prizeName: String, missedBy: List<PlayerRef>) {
+    if (missedBy.isEmpty()) return
+    StatusBanner(
+        message = "Missed $prizeName: ${missedBy.joinToString(", ") { it.name }}",
+        tone = BannerTone.Warning
     )
 }

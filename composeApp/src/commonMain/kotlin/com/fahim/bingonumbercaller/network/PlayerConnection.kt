@@ -16,5 +16,6 @@ interface PlayerConnection {
      */
     suspend fun connectAsPlayer(connectionInfo: ConnectionInfo, rejoinToken: String?, playerName: String?)
     suspend fun claimFullHouse(ticketId: String)
+    suspend fun claimLine(ticketId: String)
     suspend fun disconnect()
 }

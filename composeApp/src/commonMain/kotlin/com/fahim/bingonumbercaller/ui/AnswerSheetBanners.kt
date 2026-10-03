@@ -149,6 +149,15 @@ internal fun ResultBanner(uiState: AnswerSheetUiState) {
                             fontSize = 13.sp,
                             color = CallerColors.TextMuted
                         )
+                        if (uiState.missedFullHouse) {
+                            Text(
+                                text = "You missed it! All your numbers were called but you didn't claim in time.",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = BannerTone.Warning.content,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 }
             }

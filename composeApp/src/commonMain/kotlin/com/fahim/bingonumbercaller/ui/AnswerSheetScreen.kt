@@ -17,6 +17,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fahim.bingonumbercaller.model.Ticket
 import com.fahim.bingonumbercaller.viewmodel.AnswerSheetViewModel
@@ -29,6 +31,10 @@ fun AnswerSheetScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val scrollState = rememberScrollState()
+
+    // A locked phone stops receiving numbers; and when the player comes back, reconnect at once
+    KeepScreenOn()
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onAppForegrounded() }
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -68,6 +74,8 @@ fun AnswerSheetScreen(
             // Game Result / Claim Status Banner
             ResultBanner(uiState = uiState)
 
+            LineResultBanner(uiState = uiState)
+
             // Current Number Hero Banner
             CurrentNumberStage(
                 currentNumber = uiState.currentNumber,
@@ -83,6 +91,11 @@ fun AnswerSheetScreen(
                 isWaitingForNextGame = uiState.isWaitingForNextGame,
                 markedNumbers = uiState.markedNumbers,
                 onCellClick = { viewModel.toggleCell(it) }
+            )
+
+            ClaimLineButton(
+                uiState = uiState,
+                onClaim = { viewModel.onClaimLineTapped() }
             )
 
             // Claim Full House Action Button

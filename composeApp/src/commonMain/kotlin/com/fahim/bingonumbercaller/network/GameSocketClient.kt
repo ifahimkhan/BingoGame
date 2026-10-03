@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -72,8 +74,11 @@ class GameSocketClient(
         disconnect()
 
         try {
-            val newSession = client.webSocketSession {
-                url(socketUrl)
+            // Bounded so a reconnect loop never waits out the OS TCP timeout on a dead network
+            val newSession = withTimeout(CONNECT_TIMEOUT_MILLIS) {
+                client.webSocketSession {
+                    url(socketUrl)
+                }
             }
             session = newSession
             _isConnected.value = true
@@ -99,7 +104,10 @@ class GameSocketClient(
                 } catch (e: Exception) {
                     // Socket closed or network error
                 } finally {
-                    _isConnected.value = false
+                    // Only the current socket may report the connection lost; a replaced one ending late must not
+                    if (session === newSession) {
+                        _isConnected.value = false
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -110,6 +118,10 @@ class GameSocketClient(
 
     override suspend fun claimFullHouse(ticketId: String) {
         sendMessage(ClientMessage.ClaimFullHouse(ticketId = ticketId))
+    }
+
+    override suspend fun claimLine(ticketId: String) {
+        sendMessage(ClientMessage.ClaimLine(ticketId = ticketId))
     }
 
     override suspend fun drawNumber() {
@@ -129,7 +141,8 @@ class GameSocketClient(
     }
 
     override suspend fun disconnect() {
-        receiveJob?.cancel()
+        // Wait for the old listener to finish so its cleanup can't race the next connection
+        receiveJob?.cancelAndJoin()
         receiveJob = null
         try {
             session?.close(CloseReason(CloseReason.Codes.NORMAL, "Client disconnect"))
@@ -142,5 +155,6 @@ class GameSocketClient(
 
     private companion object {
         const val PING_INTERVAL_MILLIS = 10_000L
+        const val CONNECT_TIMEOUT_MILLIS = 8_000L
     }
 }

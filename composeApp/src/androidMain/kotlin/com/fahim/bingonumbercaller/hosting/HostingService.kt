@@ -131,9 +131,11 @@ class HostingService : Service() {
         }
     }
 
+    // LOW_LATENCY only applies while the screen is on; HIGH_PERF keeps Wi-Fi awake with it off but is a
+    // no-op from Android 14, where the Caller screen keeping the display on is what protects the game
     @Suppress("DEPRECATION")
     private fun wifiLockMode(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             WifiManager.WIFI_MODE_FULL_LOW_LATENCY
         } else {
             WifiManager.WIFI_MODE_FULL_HIGH_PERF

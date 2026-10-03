@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fahim.bingonumbercaller.protocol.PlayerSummary
+import com.fahim.bingonumbercaller.protocol.Prize
 import com.fahim.bingonumbercaller.protocol.ServerMessage
 import androidx.compose.material3.Icon
 import com.fahim.bingonumbercaller.ui.icons.BingoIcons
@@ -135,7 +136,10 @@ fun FalseClaimCard(
                 modifier = Modifier.size(20.dp)
             )
             Text(
-                text = "False claim by ${notice.playerName}",
+                text = when (notice.prize) {
+                    Prize.LINE -> "False line claim by ${notice.playerName}"
+                    Prize.FULL_HOUSE -> "False claim by ${notice.playerName}"
+                },
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Black,
                 color = WarningText

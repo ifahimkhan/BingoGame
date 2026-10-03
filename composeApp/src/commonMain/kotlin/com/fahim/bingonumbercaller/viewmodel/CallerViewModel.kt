@@ -15,6 +15,7 @@ import com.fahim.bingonumbercaller.network.EmbeddedGameServer
 import com.fahim.bingonumbercaller.network.GameServerHost
 import com.fahim.bingonumbercaller.network.HostConnection
 import com.fahim.bingonumbercaller.network.GameSocketClient
+import com.fahim.bingonumbercaller.protocol.PlayerRef
 import com.fahim.bingonumbercaller.protocol.PlayerSummary
 import com.fahim.bingonumbercaller.protocol.ServerMessage
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,8 +37,12 @@ data class CallerUiState(
     val winnerConnectionId: String? = null,
     val winnerName: String? = null,
     val players: List<PlayerSummary> = emptyList(),
-    // Latest bogus Full House call, shown to the host until dismissed or a new game starts
-    val falseClaim: ServerMessage.FalseClaim? = null
+    // Latest bogus prize call, shown to the host until dismissed or a new game starts
+    val falseClaim: ServerMessage.FalseClaim? = null,
+    val lineWinnerName: String? = null,
+    // Players who had a winning row / full ticket but didn't claim before the winner
+    val lineMissedBy: List<PlayerRef> = emptyList(),
+    val fullHouseMissedBy: List<PlayerRef> = emptyList()
 ) {
     val currentNumber: Int?
         get() = gameState.calledNumbers.lastOrNull()
@@ -62,14 +67,18 @@ private const val MILLIS_PER_SECOND = 1_000L
 internal fun CallerUiState.withServerUpdate(update: ServerMessage.GameStateUpdate): CallerUiState {
     val called = update.calledNumbers
     val calledSet = called.toSet()
+    val isComplete = update.status == STATUS_COMPLETE
     return copy(
         gameState = GameState(
             calledNumbers = called,
             remainingPool = (1..90).filterNot { it in calledSet }
         ),
-        winnerConnectionId = if (update.status == STATUS_COMPLETE) winnerConnectionId else null,
-        winnerName = if (update.status == STATUS_COMPLETE) winnerName else null,
-        falseClaim = if (called.isEmpty()) null else falseClaim
+        winnerConnectionId = if (isComplete) winnerConnectionId else null,
+        winnerName = if (isComplete) winnerName else null,
+        falseClaim = if (called.isEmpty()) null else falseClaim,
+        lineWinnerName = update.lineWinnerName,
+        lineMissedBy = if (update.lineWinnerName == null) emptyList() else lineMissedBy,
+        fullHouseMissedBy = if (isComplete) fullHouseMissedBy else emptyList()
     )
 }
 
@@ -160,7 +169,17 @@ class CallerViewModel(
                         stopAutoCall()
                         _uiState.value = _uiState.value.copy(
                             winnerConnectionId = message.winnerConnectionId,
-                            winnerName = message.winnerName
+                            winnerName = message.winnerName,
+                            fullHouseMissedBy = message.missedBy
+                        )
+                    }
+
+                    is ServerMessage.LineWon -> {
+                        // Pause so the caller can announce the line before carrying on
+                        stopAutoCall()
+                        _uiState.value = _uiState.value.copy(
+                            lineWinnerName = message.winnerName,
+                            lineMissedBy = message.missedBy
                         )
                     }
 
@@ -230,7 +249,10 @@ class CallerViewModel(
             isServerRunning = false,
             connectionInfo = null,
             players = emptyList(),
-            falseClaim = null
+            falseClaim = null,
+            lineWinnerName = null,
+            lineMissedBy = emptyList(),
+            fullHouseMissedBy = emptyList()
         )
         viewModelScope.launch {
             socketClient.disconnect()
