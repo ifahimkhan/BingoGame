@@ -80,6 +80,7 @@ internal fun reconnectDelayMillis(attempt: Int): Long =
     (1_000L shl attempt.coerceAtMost(4)).coerceAtMost(MAX_RECONNECT_DELAY_MILLIS)
 
 private const val MAX_RECONNECT_DELAY_MILLIS = 10_000L
+private const val FIRST_CONNECT_RETRIES = 3
 private const val STATUS_COMPLETE = "COMPLETE"
 private const val FEEDBACK_MILLIS = 2_000L
 private const val CLAIM_REJECTED_MILLIS = 3_500L
@@ -146,14 +147,25 @@ class AnswerSheetViewModel(
         hasJoined = false
         _uiState.update { it.copy(errorMessage = null) }
 
-        viewModelScope.launch {
-            try {
-                connection.connectAsPlayer(connectionInfo, rejoinToken, requestedName)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(errorMessage = ConnectErrorMessages.forPlayer(e, connectionInfo))
+        reconnectJob?.cancel()
+        // Held in reconnectJob so leaveGame() also stops the first-connect retries
+        reconnectJob = viewModelScope.launch {
+            var attempt = 0
+            while (true) {
+                try {
+                    connection.connectAsPlayer(connectionInfo, rejoinToken, requestedName)
+                    return@launch
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (attempt >= FIRST_CONNECT_RETRIES || !shouldStayConnected) {
+                        _uiState.update {
+                            it.copy(errorMessage = ConnectErrorMessages.forPlayer(e, connectionInfo))
+                        }
+                        return@launch
+                    }
+                    // A brief Wi-Fi blip shouldn't fail the join; back off and try again
+                    delay(reconnectDelayMillis(attempt++))
                 }
             }
         }

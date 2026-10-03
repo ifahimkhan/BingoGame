@@ -30,10 +30,15 @@ private class FakePlayerConnection : PlayerConnection {
 
     val connectCalls = mutableListOf<Pair<ConnectionInfo, String?>>()
     var failConnect = false
+    var failuresBeforeSuccess = 0
 
     override suspend fun connectAsPlayer(connectionInfo: ConnectionInfo, rejoinToken: String?, playerName: String?) {
         connectCalls += connectionInfo to rejoinToken
         if (failConnect) throw IllegalStateException("host unreachable")
+        if (failuresBeforeSuccess > 0) {
+            failuresBeforeSuccess--
+            throw IllegalStateException("host unreachable")
+        }
         isConnected.value = true
     }
 
@@ -91,6 +96,46 @@ class AnswerSheetReconnectTest {
         connection.serverSends(ServerMessage.Joined(ticket = ticket, role = "PLAYER", rejoinToken = token))
         advanceUntilIdle()
         return vm
+    }
+
+    @Test
+    fun `first connect retries three times then shows the error`() = runTest {
+        val vm = AnswerSheetViewModel(connection)
+        connection.failConnect = true
+
+        vm.connect(gameA)
+        advanceUntilIdle()
+
+        assertEquals(4, connection.connectCalls.size, "one attempt plus three retries")
+        assertTrue(vm.uiState.value.errorMessage != null)
+        assertFalse(vm.uiState.value.isReconnecting)
+    }
+
+    @Test
+    fun `first connect succeeds on a retry without showing an error`() = runTest {
+        val vm = AnswerSheetViewModel(connection)
+        connection.failuresBeforeSuccess = 2
+
+        vm.connect(gameA)
+        advanceUntilIdle()
+
+        assertEquals(3, connection.connectCalls.size)
+        assertTrue(connection.isConnected.value)
+        assertNull(vm.uiState.value.errorMessage)
+    }
+
+    @Test
+    fun `leaving during first connect retries stops them`() = runTest {
+        val vm = AnswerSheetViewModel(connection)
+        connection.failConnect = true
+
+        vm.connect(gameA)
+        advanceTimeBy(500)
+        vm.leaveGame()
+        advanceUntilIdle()
+
+        assertEquals(1, connection.connectCalls.size)
+        assertNull(vm.uiState.value.errorMessage)
     }
 
     @Test
